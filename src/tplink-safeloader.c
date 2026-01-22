@@ -3679,13 +3679,13 @@ static struct image_partition_entry make_extra_para(
 }
 
 /** Creates a new image partition with an arbitrary name from a file */
-static struct image_partition_entry read_file(const char *part_name, const char *filename, bool add_jffs2_eof, struct flash_partition_entry *file_system_partition) {
+static struct image_partition_entry read_file(const char *part_name, const char *filename, bool add_jffs2_eof, struct flash_partition_entry *file_system_partition, size_t pad) {
 	struct stat statbuf;
 
 	if (stat(filename, &statbuf) < 0)
 		error(1, errno, "unable to stat file `%s'", filename);
 
-	size_t len = statbuf.st_size;
+	size_t len = statbuf.st_size + pad;
 
 	if (add_jffs2_eof) {
 		if (file_system_partition)
@@ -3695,6 +3695,7 @@ static struct image_partition_entry read_file(const char *part_name, const char 
 	}
 
 	struct image_partition_entry entry = alloc_image_partition(part_name, len);
+	memset(entry.data, 0xff, entry.size);
 
 	FILE *file = fopen(filename, "rb");
 	if (!file)
@@ -3704,9 +3705,8 @@ static struct image_partition_entry read_file(const char *part_name, const char 
 		error(1, errno, "unable to read file `%s'", filename);
 
 	if (add_jffs2_eof) {
-		uint8_t *eof = entry.data + statbuf.st_size, *end = entry.data+entry.size;
+		uint8_t *end = entry.data+entry.size;
 
-		memset(eof, 0xff, end - eof - sizeof(jffs2_eof_mark));
 		memcpy(end - sizeof(jffs2_eof_mark), jffs2_eof_mark, sizeof(jffs2_eof_mark));
 	}
 
@@ -3904,6 +3904,7 @@ static void build_image(const char *output,
 	struct flash_partition_entry *os_image_partition = NULL;
 	struct flash_partition_entry *file_system_partition = NULL;
 	size_t firmware_partition_index = 0;
+	size_t os_image_pad = 0;
 
 	set_partition_names(info);
 
@@ -3935,8 +3936,13 @@ static void build_image(const char *output,
 		file_system_partition->base = firmware_partition->base + kernel.st_size;
 
 		/* Align partition start to erase blocks for factory images only */
-		if (!sysupgrade)
+		if (!sysupgrade) {
 			file_system_partition->base = ALIGN(firmware_partition->base + kernel.st_size, 0x10000);
+			/* Insert padding to gaurantee old rootfs magic is overwritten */
+			os_image_pad = file_system_partition->base - firmware_partition->base - kernel.st_size;
+			if (os_image_pad > 4)
+				os_image_pad = 4;
+		}
 
 		file_system_partition->size = firmware_partition->size - (file_system_partition->base - firmware_partition->base);
 
@@ -3948,8 +3954,8 @@ static void build_image(const char *output,
 	parts[0] = make_partition_table(info);
 	parts[1] = make_soft_version(info, rev);
 	parts[2] = make_support_list(info);
-	parts[3] = read_file(info->partition_names.os_image, kernel_image, false, NULL);
-	parts[4] = read_file(info->partition_names.file_system, rootfs_image, add_jffs2_eof, file_system_partition);
+	parts[3] = read_file(info->partition_names.os_image, kernel_image, false, NULL, os_image_pad);
+	parts[4] = read_file(info->partition_names.file_system, rootfs_image, add_jffs2_eof, file_system_partition, 0);
 
 
 	/* Some devices need the extra-para partition to accept the firmware */
